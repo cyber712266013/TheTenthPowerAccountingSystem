@@ -1,0 +1,504 @@
+// ============================================================
+// Prisma Schema — نظام تحليل الفواتير والمستندات المالية
+// ============================================================
+// المبدأ: كل جدول يحتوي على حقل metadata (Json) لأي بيانات إضافية
+// قاعدة الرصيد: balance = previous_balance + on_us - for_us
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum UserRole {
+  admin
+  accountant
+  reviewer
+  viewer
+}
+
+enum PartyType {
+  customer
+  supplier
+  person
+  company
+  bank
+  both
+  other
+}
+
+enum DocumentType {
+  invoice
+  payment_receipt
+  bank_transfer
+  receipt
+  debit_note
+  credit_note
+  account_statement
+  expense
+  handwritten
+  unknown
+  other
+}
+
+enum ProcessingStatus {
+  uploaded
+  processing
+  extracted
+  needs_review
+  approved
+  rejected
+  failed
+  voided
+}
+
+enum OperationType {
+  invoice
+  payment
+  receipt
+  bank_transfer
+  expense
+  opening_balance
+  adjustment
+  credit_note
+  debit_note
+  manual
+  other
+}
+
+// gave: عليه → on_us = amount, for_us = 0
+// received: له → on_us = 0, for_us = amount
+enum TransactionDirection {
+  gave
+  received
+}
+
+enum TransactionStatus {
+  pending
+  approved
+  voided
+  cancelled
+}
+
+enum Currency {
+  SAR
+  USD
+  EUR
+  AED
+  KWD
+  BHD
+  OMR
+  QAR
+  EGP
+  JOD
+  other
+}
+
+// ============================================================
+// USERS
+// ============================================================
+
+model User {
+  id            String   @id @default(cuid())
+  name          String
+  email         String   @unique
+  password      String   // hashed
+  role          UserRole @default(accountant)
+  isActive      Boolean  @default(true)
+  
+  // مرونة: أي بيانات إضافية للمستخدم (avatar, preferences, etc.)
+  metadata      Json?    @db.JsonB
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  uploadedDocuments   Document[]    @relation("UploadedBy")
+  approvedTransactions Transaction[] @relation("ApprovedBy")
+  createdTransactions  Transaction[] @relation("CreatedBy")
+  auditLogs           AuditLog[]
+
+  @@map("users")
+}
+
+// ============================================================
+// PARTIES — الأطراف (موردون، عملاء، أشخاص، شركات)
+// ============================================================
+
+model Party {
+  id                    String    @id @default(cuid())
+  name                  String    // الاسم الأصلي
+  normalizedName        String    // للبحث والمطابقة (بدون تشكيل، lowercase)
+  aliases               String[]  // أسماء بديلة للنفس الجهة
+  type                  PartyType @default(other)
+  
+  // بيانات التواصل
+  phone                 String?
+  email                 String?
+  address               String?
+  
+  // بيانات تجارية
+  taxNumber             String?   // الرقم الضريبي
+  commercialRegistration String?  // السجل التجاري
+  bankAccount           String?   // رقم الحساب البنكي
+  bankName              String?
+  iban                  String?
+  
+  // الرصيد الافتتاحي
+  openingBalance        Decimal   @default(0) @db.Decimal(18, 4)
+  openingBalanceDate    DateTime?
+  
+  isActive              Boolean   @default(true)
+  notes                 String?
+  
+  // مرونة: أي بيانات إضافية (رقم المورد، تصنيف داخلي، إلخ)
+  metadata              Json?     @db.JsonB
+
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  // Relations
+  invoices              Invoice[]
+  transactions          Transaction[]
+  payments              Payment[]
+
+  @@map("parties")
+}
+
+// ============================================================
+// DOCUMENTS — المستندات المرفوعة
+// ============================================================
+
+model Document {
+  id                  String           @id @default(cuid())
+  
+  // بيانات Google Drive
+  googleDriveFileId   String?          @unique
+  googleDriveViewLink String?
+  googleDriveWebLink  String?
+  googleDriveFolderId String?
+  
+  // بيانات الملف
+  fileName            String
+  originalFileName    String
+  mimeType            String
+  fileSizeBytes       Int
+  fileHash            String?          // SHA-256 للكشف عن التكرار
+  documentHash        String?          // hash من محتوى المستند لكشف التكرار
+  pageCount           Int?
+  
+  // نوع المصدر
+  sourceType          String           @default("upload") // upload | camera | mobile | scanner
+  
+  // نتيجة Gemini
+  processingStatus    ProcessingStatus @default(uploaded)
+  rawExtraction       Json?            @db.JsonB  // النتيجة الخام من Gemini
+  extractedData       Json?            @db.JsonB  // البيانات بعد Validation
+  overallConfidence   Decimal?         @db.Decimal(5, 4)
+  processingError     String?
+  processingAttempts  Int              @default(0)
+  lastProcessedAt     DateTime?
+  
+  // تحذيرات من Gemini
+  warnings            String[]
+  
+  // مرونة: أي بيانات إضافية
+  metadata            Json?            @db.JsonB
+  
+  // حقول مرنة مخصصة قابلة للتوسع (custom fields)
+  customFields        Json?            @db.JsonB
+
+  uploadedAt          DateTime         @default(now())
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  // Relations
+  uploadedBy          User             @relation("UploadedBy", fields: [uploadedById], references: [id])
+  uploadedById        String
+  
+  invoice             Invoice?
+  transactions        Transaction[]
+  duplicateOf         Document?        @relation("DuplicateOf", fields: [duplicateOfId], references: [id])
+  duplicateOfId       String?
+  potentialDuplicates Document[]       @relation("DuplicateOf")
+  auditLogs           AuditLog[]
+
+  @@map("documents")
+}
+
+// ============================================================
+// INVOICES — الفواتير المستخرجة
+// ============================================================
+
+model Invoice {
+  id              String    @id @default(cuid())
+  
+  // الفاتورة الأصلية
+  invoiceNumber   String?   // قد يكون null إذا لم يوجد رقم
+  invoiceDate     DateTime? // تاريخ الفاتورة من المستند (قد يكون null)
+  dueDate         DateTime?
+  
+  // الطرف
+  party           Party?    @relation(fields: [partyId], references: [id])
+  partyId         String?
+  partyNameRaw    String?   // الاسم كما استخرجه Gemini قبل المطابقة
+  partyMatchConfidence Decimal? @db.Decimal(5, 4)
+  
+  // العملة
+  currency        Currency  @default(SAR)
+  
+  // المبالغ — يحسبها Backend، ليس Gemini
+  subtotal        Decimal   @default(0) @db.Decimal(18, 4)
+  taxAmount       Decimal   @default(0) @db.Decimal(18, 4)
+  taxRate         Decimal?  @db.Decimal(5, 4) // نسبة الضريبة (15% = 0.15)
+  discount        Decimal   @default(0) @db.Decimal(18, 4)
+  discountRate    Decimal?  @db.Decimal(5, 4)
+  total           Decimal   @default(0) @db.Decimal(18, 4)
+  paidAmount      Decimal   @default(0) @db.Decimal(18, 4)
+  remainingAmount Decimal   @default(0) @db.Decimal(18, 4)
+  
+  // تحقق: هل مجموع البنود = subtotal؟
+  itemsTotalCalculated Decimal? @db.Decimal(18, 4) // يحسبه Backend
+  hasMathDiscrepancy   Boolean  @default(false)
+  discrepancyDetails   String?
+  
+  notes           String?
+  
+  // مرونة كاملة: أي حقل إضافي من أي نوع فاتورة
+  // مثل: رقم أمر الشراء، رقم العقد، مركز التكلفة، رقم المشروع
+  extraFields     Json?     @db.JsonB
+  
+  // مرونة: metadata عامة
+  metadata        Json?     @db.JsonB
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relations
+  document        Document  @relation(fields: [documentId], references: [id])
+  documentId      String    @unique
+  items           InvoiceItem[]
+  transaction     Transaction?
+
+  @@map("invoices")
+}
+
+// ============================================================
+// INVOICE ITEMS — بنود الفاتورة
+// ============================================================
+
+model InvoiceItem {
+  id          String   @id @default(cuid())
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoiceId   String
+  
+  lineNumber  Int?     // رقم الصف في الفاتورة الأصلية
+  description String
+  unit        String?  // وحدة القياس (متر، كيلو، قطعة...)
+  quantity    Decimal? @db.Decimal(18, 4)
+  unitPrice   Decimal? @db.Decimal(18, 4)
+  taxRate     Decimal? @db.Decimal(5, 4)
+  taxAmount   Decimal? @db.Decimal(18, 4)
+  discount    Decimal? @db.Decimal(18, 4)
+  total       Decimal  @default(0) @db.Decimal(18, 4)
+  
+  // Confidence من Gemini لكل بند
+  confidence  Decimal? @db.Decimal(5, 4)
+  
+  // مرونة: أي بيانات إضافية لكل بند (رمز المنتج، الباركود، الوصف التفصيلي...)
+  extraFields Json?    @db.JsonB
+  
+  notes       String?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("invoice_items")
+}
+
+// ============================================================
+// TRANSACTIONS — الحركات المالية (أهم جدول)
+// ============================================================
+
+model Transaction {
+  id               String             @id @default(cuid())
+  
+  // الطرف
+  party            Party?             @relation(fields: [partyId], references: [id])
+  partyId          String?
+  
+  // المستندات المصدر
+  document         Document?          @relation(fields: [documentId], references: [id])
+  documentId       String?
+  invoice          Invoice?           @relation(fields: [invoiceId], references: [id])
+  invoiceId        String?            @unique
+  payment          Payment?           @relation(fields: [paymentId], references: [id])
+  paymentId        String?
+  
+  // التاريخ
+  transactionDate  DateTime           // تاريخ الحركة (من المستند)
+  
+  // البيان
+  details          String             // وصف الحركة
+  reference        String?            // مرجع (رقم فاتورة، رقم تحويل...)
+  
+  // نوع العملية
+  operationType    OperationType      @default(manual)
+  direction        TransactionDirection // gave (عليه) | received (له)
+  
+  // المبالغ — يحسبها Backend دائمًا
+  amount           Decimal            @db.Decimal(18, 4)
+  onUs             Decimal            @default(0) @db.Decimal(18, 4) // عليه
+  forUs            Decimal            @default(0) @db.Decimal(18, 4) // له
+  
+  // الرصيد — يحسبه Backend دائمًا
+  balanceBefore    Decimal            @db.Decimal(18, 4)
+  balanceAfter     Decimal            @db.Decimal(18, 4)
+  
+  // العملة
+  currency         Currency           @default(SAR)
+  exchangeRate     Decimal?           @db.Decimal(18, 6) // سعر الصرف إذا لزم
+  
+  // الحالة
+  status           TransactionStatus  @default(pending)
+  
+  notes            String?
+  
+  // مرونة: أي بيانات إضافية (مركز التكلفة، رمز المشروع، قسم...)
+  extraFields      Json?              @db.JsonB
+  metadata         Json?              @db.JsonB
+  
+  // من أنشأ واعتمد
+  createdBy        User               @relation("CreatedBy", fields: [createdById], references: [id])
+  createdById      String
+  approvedBy       User?              @relation("ApprovedBy", fields: [approvedById], references: [id])
+  approvedById     String?
+  approvedAt       DateTime?
+  
+  // إلغاء
+  voidedAt         DateTime?
+  voidReason       String?
+
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  @@map("transactions")
+}
+
+// ============================================================
+// PAYMENTS — المدفوعات
+// ============================================================
+
+model Payment {
+  id            String    @id @default(cuid())
+  party         Party?    @relation(fields: [partyId], references: [id])
+  partyId       String?
+  
+  paymentDate   DateTime
+  amount        Decimal   @db.Decimal(18, 4)
+  currency      Currency  @default(SAR)
+  
+  paymentMethod String?   // cash | bank_transfer | check | other
+  reference     String?   // رقم الشيك أو رقم التحويل
+  bankName      String?
+  
+  notes         String?
+  
+  // مرونة
+  extraFields   Json?     @db.JsonB
+  metadata      Json?     @db.JsonB
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  transactions  Transaction[]
+
+  @@map("payments")
+}
+
+// ============================================================
+// AUDIT LOGS — سجل التدقيق
+// ============================================================
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  
+  // من قام بالتغيير
+  user        User?    @relation(fields: [userId], references: [id])
+  userId      String?
+  
+  // ما الذي تغير
+  entityType  String   // "transaction" | "invoice" | "document" | "party" | ...
+  entityId    String   // ID السجل المتغير
+  
+  // التغيير
+  action      String   // "create" | "update" | "approve" | "reject" | "void" | "delete"
+  fieldName   String?  // اسم الحقل الذي تغير
+  oldValue    Json?    @db.JsonB // القيمة القديمة
+  newValue    Json?    @db.JsonB // القيمة الجديدة
+  reason      String?  // سبب التغيير
+  
+  // السياق
+  ipAddress   String?
+  userAgent   String?
+  
+  // مرونة: أي بيانات سياق إضافية
+  metadata    Json?    @db.JsonB
+
+  // Relations (optional links)
+  document    Document? @relation(fields: [documentId], references: [id])
+  documentId  String?
+
+  createdAt   DateTime @default(now())
+
+  @@map("audit_logs")
+}
+
+// ============================================================
+// SYSTEM SETTINGS — إعدادات النظام
+// ============================================================
+
+model SystemSetting {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  value       Json     @db.JsonB // قابل لتخزين أي نوع من القيم
+  description String?
+  isPublic    Boolean  @default(false) // هل تُرسل للواجهة؟
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("system_settings")
+}
+
+// ============================================================
+// IMPORT JOBS — مهام الاستيراد (Excel/CSV مستقبلًا)
+// ============================================================
+
+model ImportJob {
+  id           String   @id @default(cuid())
+  fileName     String
+  status       String   @default("pending") // pending | processing | completed | failed
+  totalRows    Int?
+  processedRows Int?
+  failedRows   Int?
+  errors       Json?    @db.JsonB
+  result       Json?    @db.JsonB
+  
+  // مرونة
+  metadata     Json?    @db.JsonB
+  
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("import_jobs")
+}
