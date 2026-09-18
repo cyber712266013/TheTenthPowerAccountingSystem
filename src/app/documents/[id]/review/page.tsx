@@ -19,6 +19,8 @@ interface DocumentData {
   rawExtraction: GeminiExtractionResult | null;
   extractedData: Record<string, unknown> | null;
   uploadedAt: string;
+  invoice?: any;
+  transactions?: any[];
 }
 
 const OPERATION_LABELS: Record<OperationType, string> = {
@@ -73,6 +75,54 @@ export default function ReviewPage({ params }: ReviewPageProps) {
   const [mathWarning, setMathWarning] = useState('');
   const [newExtraKey, setNewExtraKey] = useState('');
   const [newExtraVal, setNewExtraVal] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
+  const [invoiceCheck, setInvoiceCheck] = useState<{
+    exists: boolean;
+    isApproved?: boolean;
+    otherDocument?: {
+      documentId: string;
+      fileName: string;
+      partyName: string;
+      total: number;
+      isApproved: boolean;
+      status: string;
+      invoiceNumber: string;
+      transactionId?: string;
+    } | null;
+    currentDocument?: {
+      documentId: string;
+      fileName: string;
+      partyName: string;
+      total: number;
+      isApproved: boolean;
+      status: string;
+      invoiceNumber: string;
+      transactionId?: string;
+    } | null;
+    partyName?: string;
+    total?: number;
+    documentId?: string;
+    invoiceNumber?: string;
+  } | null>(null);
+
+  // ─── التحقق التلقائي إذا كان رقم الفاتورة مسجل ومعتمد في قواعد البيانات ───
+  useEffect(() => {
+    const invNum = form.invoiceNumber?.trim();
+    if (!invNum || invNum.length < 3) {
+      setInvoiceCheck(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      fetch(`/api/documents/check-invoice?number=${encodeURIComponent(invNum)}&excludeId=${id}`)
+        .then(r => r.json())
+        .then(data => {
+          if (data.exists) setInvoiceCheck(data);
+          else setInvoiceCheck(null);
+        })
+        .catch(() => setInvoiceCheck(null));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [form.invoiceNumber, id]);
 
   // ─── Load document ────────────────────────────────────────
   useEffect(() => {
@@ -91,48 +141,137 @@ export default function ReviewPage({ params }: ReviewPageProps) {
         }
 
         setDoc(docData.data);
-        setParties(partiesData.data || []);
+        const partiesList = partiesData.data || [];
+        setParties(partiesList);
 
-        // Pre-fill form from extraction
+        function matchPartyId(name: string): string {
+          if (!name || partiesList.length === 0) return '';
+          const norm = name
+            .trim()
+            .toLowerCase()
+            .replace(/[\u064B-\u065F\u0670]/g, '')
+            .replace(/[أإآ]/g, 'ا')
+            .replace(/ة/g, 'ه')
+            .replace(/ى/g, 'ي')
+            .replace(/\s+/g, ' ');
+          const found = partiesList.find((p: any) => {
+            const pNorm = (p.normalizedName || p.name || '')
+              .toLowerCase()
+              .replace(/[\u064B-\u065F\u0670]/g, '')
+              .replace(/[أإآ]/g, 'ا')
+              .replace(/ة/g, 'ه')
+              .replace(/ى/g, 'ي')
+              .replace(/\s+/g, ' ');
+            return pNorm === norm || p.name.trim() === name.trim();
+          });
+          return found ? found.id : '';
+        }
+
+        // Pre-fill form: الأولوية لبيانات الفاتورة والحركة المسجلة بقاعدة البيانات، ثم الاستخراج الأولي
+        const inv = docData.data.invoice;
+        const tx = docData.data.transactions && docData.data.transactions.length > 0 ? docData.data.transactions[0] : null;
         const extraction = docData.data.rawExtraction as GeminiExtractionResult | null;
-        if (extraction) {
-          const partyMatch = (docData.data.extractedData as Record<string, unknown>)?.partyMatch as {
-            matchFound: boolean; partyId?: string; partyName?: string;
-          } | undefined;
+        const extracted = (docData.data.extractedData as Record<string, any>) || null;
+        const partyMatch = extracted?.partyMatch as {
+          matchFound: boolean; partyId?: string; partyName?: string;
+        } | undefined;
 
-          const items: ReviewItemData[] = (extraction.items || []).map(item => ({
-            description: item.description?.value || '',
-            unit: item.unit?.value || undefined,
-            quantity: item.quantity?.value ?? undefined,
-            unitPrice: item.unit_price?.value ?? undefined,
-            taxRate: item.tax_rate?.value ?? undefined,
-            taxAmount: item.tax_amount?.value ?? undefined,
-            discount: item.discount?.value ?? undefined,
-            total: item.total?.value || 0,
+        if (inv) {
+          const invItems: ReviewItemData[] = (inv.items || []).map((it: any) => ({
+            description: it.description || '',
+            unit: it.unit || undefined,
+            quantity: it.quantity !== null && it.quantity !== undefined ? parseFloat(it.quantity.toString()) : undefined,
+            unitPrice: it.unitPrice !== null && it.unitPrice !== undefined ? parseFloat(it.unitPrice.toString()) : undefined,
+            taxRate: it.taxRate !== null && it.taxRate !== undefined ? parseFloat(it.taxRate.toString()) : undefined,
+            taxAmount: it.taxAmount !== null && it.taxAmount !== undefined ? parseFloat(it.taxAmount.toString()) : undefined,
+            discount: it.discount !== null && it.discount !== undefined ? parseFloat(it.discount.toString()) : undefined,
+            total: parseFloat(it.total?.toString() || '0'),
           }));
+
+          const partyName = inv.party?.name || inv.partyNameRaw || extraction?.party?.name?.value || extracted?.party?.name?.value || '';
+          const resolvedPartyId = inv.partyId || inv.party?.id || partyMatch?.partyId || matchPartyId(partyName);
 
           setForm(f => ({
             ...f,
-            documentType: (extraction.document_type as ReviewFormData['documentType']) || 'invoice',
-            invoiceNumber: extraction.invoice_number?.value || '',
-            invoiceDate: extraction.invoice_date?.value || '',
-            partyId: partyMatch?.partyId || '',
-            partyName: extraction.party?.name?.value || '',
-            currency: (extraction.financial?.currency?.value as Currency) || 'SAR',
-            subtotal: extraction.financial?.subtotal?.value || 0,
-            taxAmount: extraction.financial?.tax_amount?.value || 0,
-            discount: extraction.financial?.discount?.value || 0,
-            total: extraction.financial?.total?.value || 0,
-            paidAmount: extraction.financial?.paid?.value || 0,
-            remainingAmount: extraction.financial?.remaining?.value || 0,
-            items: items.length > 0 ? items : f.items,
-            operationType: (extraction.transaction?.operation?.value as OperationType) || 'invoice',
-            direction: (extraction.transaction?.direction?.value as TransactionDirection) || 'gave',
-            transactionDate: extraction.invoice_date?.value || f.transactionDate,
-            details: extraction.transaction?.description?.value || '',
+            documentType: (tx?.operationType as ReviewFormData['documentType']) || (extraction?.document_type as ReviewFormData['documentType']) || (extracted?.document_type as ReviewFormData['documentType']) || 'invoice',
+            invoiceNumber: inv.invoiceNumber || extraction?.invoice_number?.value || extracted?.invoice_number?.value || '',
+            invoiceDate: inv.invoiceDate ? String(inv.invoiceDate).split('T')[0] : (extraction?.invoice_date?.value || extracted?.invoice_date?.value || ''),
+            partyId: resolvedPartyId,
+            partyName,
+            currency: (inv.currency as Currency) || (extraction?.financial?.currency?.value as Currency) || (extracted?.financial?.currency?.value as Currency) || 'SAR',
+            subtotal: parseFloat(inv.subtotal?.toString() || '0') || extraction?.financial?.subtotal?.value || extracted?.financial?.subtotal?.value || 0,
+            taxAmount: parseFloat(inv.taxAmount?.toString() || '0') || extraction?.financial?.tax_amount?.value || extracted?.financial?.tax_amount?.value || 0,
+            discount: parseFloat(inv.discount?.toString() || '0') || extraction?.financial?.discount?.value || extracted?.financial?.discount?.value || 0,
+            total: parseFloat(inv.total?.toString() || '0') || extraction?.financial?.total?.value || extracted?.financial?.total?.value || 0,
+            paidAmount: parseFloat(inv.paidAmount?.toString() || '0') || extraction?.financial?.paid?.value || extracted?.financial?.paid?.value || 0,
+            remainingAmount: parseFloat(inv.remainingAmount?.toString() || '0') || extraction?.financial?.remaining?.value || extracted?.financial?.remaining?.value || 0,
+            items: invItems.length > 0 ? invItems : f.items,
+            operationType: (tx?.operationType as OperationType) || (extraction?.transaction?.operation?.value as OperationType) || (extracted?.transaction?.operation?.value as OperationType) || 'invoice',
+            direction: (tx?.direction as TransactionDirection) || (extraction?.transaction?.direction?.value as TransactionDirection) || (extracted?.transaction?.direction?.value as TransactionDirection) || 'gave',
+            transactionDate: tx?.transactionDate ? String(tx.transactionDate).split('T')[0] : (inv.invoiceDate ? String(inv.invoiceDate).split('T')[0] : (extraction?.invoice_date?.value || extracted?.invoice_date?.value || f.transactionDate)),
+            details: tx?.details || inv.notes || extraction?.transaction?.description?.value || extracted?.transaction?.description?.value || '',
+            notes: inv.notes || '',
+            extraFields: inv.extraFields || {},
           }));
 
-          setPartySearch(extraction.party?.name?.value || '');
+          setPartySearch(partyName);
+        } else if (extraction || extracted) {
+          const rawItems = extraction?.items || extracted?.items || [];
+          const items: ReviewItemData[] = rawItems.map((item: any) => {
+            const getVal = (field: any) => {
+              if (field === null || field === undefined) return undefined;
+              if (typeof field === 'object' && 'value' in field) {
+                return field.value !== null && field.value !== undefined ? field.value : undefined;
+              }
+              return field;
+            };
+
+            const desc = getVal(item.description);
+            const unit = getVal(item.unit);
+            const qty = getVal(item.quantity);
+            const unitPrice = getVal(item.unit_price ?? item.unitPrice);
+            const taxRate = getVal(item.tax_rate ?? item.taxRate);
+            const taxAmount = getVal(item.tax_amount ?? item.taxAmount);
+            const discount = getVal(item.discount);
+            const total = getVal(item.total);
+
+            return {
+              description: typeof desc === 'string' ? desc : String(desc || ''),
+              unit: unit ? String(unit) : undefined,
+              quantity: qty !== undefined && qty !== null ? parseFloat(String(qty)) : undefined,
+              unitPrice: unitPrice !== undefined && unitPrice !== null ? parseFloat(String(unitPrice)) : undefined,
+              taxRate: taxRate !== undefined && taxRate !== null ? parseFloat(String(taxRate)) : undefined,
+              taxAmount: taxAmount !== undefined && taxAmount !== null ? parseFloat(String(taxAmount)) : undefined,
+              discount: discount !== undefined && discount !== null ? parseFloat(String(discount)) : undefined,
+              total: total !== undefined && total !== null ? (parseFloat(String(total)) || 0) : 0,
+            };
+          });
+
+          const partyName = extraction?.party?.name?.value || extracted?.party?.name?.value || '';
+          const resolvedPartyId = partyMatch?.partyId || matchPartyId(partyName);
+
+          setForm(f => ({
+            ...f,
+            documentType: (extraction?.document_type as ReviewFormData['documentType']) || (extracted?.document_type as ReviewFormData['documentType']) || 'invoice',
+            invoiceNumber: extraction?.invoice_number?.value || extracted?.invoice_number?.value || '',
+            invoiceDate: extraction?.invoice_date?.value || extracted?.invoice_date?.value || '',
+            partyId: resolvedPartyId,
+            partyName,
+            currency: (extraction?.financial?.currency?.value as Currency) || (extracted?.financial?.currency?.value as Currency) || 'SAR',
+            subtotal: extraction?.financial?.subtotal?.value || extracted?.financial?.subtotal?.value || 0,
+            taxAmount: extraction?.financial?.tax_amount?.value || extracted?.financial?.tax_amount?.value || 0,
+            discount: extraction?.financial?.discount?.value || extracted?.financial?.discount?.value || 0,
+            total: extraction?.financial?.total?.value || extracted?.financial?.total?.value || 0,
+            paidAmount: extraction?.financial?.paid?.value || extracted?.financial?.paid?.value || 0,
+            remainingAmount: extraction?.financial?.remaining?.value || extracted?.financial?.remaining?.value || 0,
+            items: items.length > 0 ? items : f.items,
+            operationType: (extraction?.transaction?.operation?.value as OperationType) || (extracted?.transaction?.operation?.value as OperationType) || 'invoice',
+            direction: (extraction?.transaction?.direction?.value as TransactionDirection) || (extracted?.transaction?.direction?.value as TransactionDirection) || 'gave',
+            transactionDate: extraction?.invoice_date?.value || extracted?.invoice_date?.value || f.transactionDate,
+            details: extraction?.transaction?.description?.value || extracted?.transaction?.description?.value || '',
+          }));
+
+          setPartySearch(partyName);
         }
       } catch {
         setError('فشل تحميل بيانات المستند');
@@ -217,6 +356,14 @@ export default function ReviewPage({ params }: ReviewPageProps) {
       return;
     }
 
+    // تنبيه وتحذير إذا كان رقم الفاتورة معتمداً في مستند آخر
+    if (invoiceCheck?.otherDocument?.isApproved) {
+      const confirmDup = confirm(
+        `⚠️ تنبيه تكرار معتمد:\nرقم الفاتورة (${form.invoiceNumber}) مسجل ومعتمد مسبقاً في النظام للطرف (${invoiceCheck.otherDocument.partyName || 'مسجل'}) بمبلغ (${invoiceCheck.otherDocument.total} ر.س) في مستند (${invoiceCheck.otherDocument.fileName}).\n\nإذا تابعت الاعتماد، فسيتم إنشاء حركة مالية جديدة مكررة في كشف الحساب!\n\nهل أنت متأكد تماماً من رغبتك في إنشاء حركة مكررة؟\n(ملاحظة: يمكنك الضغط على "إلغاء" واستخدام زر "💾 حفظ التعديلات في نفس المستند" لحفظ تعديلاتك دون تكرار الحركة)`
+      );
+      if (!confirmDup) return;
+    }
+
     setSubmitting(true);
     setError('');
 
@@ -231,7 +378,58 @@ export default function ReviewPage({ params }: ReviewPageProps) {
       if (data.success) {
         router.push(`/transactions/${data.transactionId}?approved=1`);
       } else {
-        setError(data.error || 'فشل اعتماد المستند');
+        setError(data.details ? `${data.error}: ${data.details}` : (data.error || 'فشل اعتماد المستند'));
+      }
+    } catch {
+      setError('حدث خطأ في الاتصال');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  // ─── حفظ التعديلات فقط في نفس المستند ─────────────────────
+  async function handleSaveDraft() {
+    setSubmitting(true);
+    setError('');
+    setSuccessMessage('');
+    try {
+      const res = await fetch(`/api/documents/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          documentType: form.documentType,
+          invoiceNumber: form.invoiceNumber,
+          invoiceDate: form.invoiceDate,
+          partyId: form.partyId,
+          partyName: form.partyName,
+          currency: form.currency,
+          subtotal: form.subtotal,
+          taxAmount: form.taxAmount,
+          discount: form.discount,
+          total: form.total,
+          paidAmount: form.paidAmount,
+          remainingAmount: form.remainingAmount,
+          operationType: form.operationType,
+          direction: form.direction,
+          details: form.details,
+          items: form.items,
+          transactionDate: form.transactionDate,
+          notes: form.notes,
+          customFields: form.extraFields,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSuccessMessage('✅ تم حفظ التعديلات بنجاح في نفس المستند وتحديث كشف الحساب مباشرة دون تكرار!');
+        // إعادة تحميل بيانات المستند لتحديث الواجهة تلقائياً
+        const refreshed = await fetch(`/api/documents/${id}`);
+        const refData = await refreshed.json();
+        if (refData.success && refData.data) {
+          setDoc(refData.data);
+        }
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } else {
+        setError(data.error || 'فشل حفظ التعديلات');
       }
     } catch {
       setError('حدث خطأ في الاتصال');
@@ -330,8 +528,8 @@ export default function ReviewPage({ params }: ReviewPageProps) {
           <h1 style={{ fontSize: 'var(--font-size-xl)', fontWeight: 800 }}>مراجعة المستند</h1>
           <p className="text-muted text-sm mt-1">{doc?.fileName}</p>
         </div>
-        <div className="flex gap-3" style={{ flexWrap: 'wrap' }}>
-          <button className="btn btn-secondary" onClick={() => router.back()}>رجوع</button>
+        <div className="flex gap-3" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
+          <button className="btn btn-secondary btn-sm" onClick={() => router.back()}>رجوع</button>
           <button
             className="btn btn-warning btn-sm"
             onClick={() => handleReAnalyze()}
@@ -349,15 +547,155 @@ export default function ReviewPage({ params }: ReviewPageProps) {
             📂 رفع وتحليل
           </button>
           <button className="btn btn-danger btn-sm" onClick={handleReject}>رفض</button>
+
+          {/* زر حفظ التعديلات في نفس المستند - بارز ومجاور لزر الاعتماد */}
           <button
+            type="button"
+            className="btn"
+            onClick={handleSaveDraft}
+            disabled={submitting}
+            title="حفظ التعديلات في نفس المستند الحالي وتحديث كشف الحساب دون إنشاء حركة جديدة"
+            style={{
+              background: 'linear-gradient(135deg, #4f46e5, #7c3aed)',
+              color: '#ffffff',
+              border: 'none',
+              fontWeight: 800,
+              fontSize: '0.9rem',
+              padding: '0.65rem 1.4rem',
+              borderRadius: '8px',
+              boxShadow: '0 4px 14px rgba(79, 70, 229, 0.4)',
+              cursor: submitting ? 'not-allowed' : 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.4rem',
+            }}
+          >
+            💾 حفظ التعديلات في نفس المستند
+          </button>
+
+          <button
+            type="button"
             className={`btn btn-success ${submitting ? 'btn-loading' : ''}`}
             onClick={handleApprove}
             disabled={submitting}
+            style={{
+              padding: '0.65rem 1.4rem',
+              fontWeight: 800,
+              fontSize: '0.9rem',
+              borderRadius: '8px',
+            }}
           >
-            {!submitting && '✓ اعتماد وإنشاء حركة مالية'}
+            {!submitting && (doc?.processingStatus === 'approved' ? '✓ تحديث واعتماد الحركة المالية' : '✓ اعتماد وإنشاء حركة مالية')}
           </button>
         </div>
       </div>
+
+      {/* تنبيه النجاح بعد حفظ التعديلات */}
+      {successMessage && (
+        <div style={{
+          background: 'rgba(34,197,94,0.12)', border: '1px solid rgba(34,197,94,0.3)',
+          color: '#4ade80', borderRadius: '12px', padding: '1rem 1.2rem', marginBottom: '1.5rem',
+          fontSize: '0.95rem', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <span>{successMessage}</span>
+          <button onClick={() => setSuccessMessage('')} style={{ background: 'none', border: 'none', color: '#4ade80', cursor: 'pointer', fontSize: '1rem' }}>✕</button>
+        </div>
+      )}
+
+      {/* 1. تنبيه خطر/تحذير إذا كان رقم الفاتورة مسجل ومعتمد في مستند آخر (تكرار معتمد) */}
+      {invoiceCheck?.otherDocument?.isApproved && (
+        <div style={{
+          background: 'linear-gradient(135deg, rgba(239, 68, 68, 0.16), rgba(185, 28, 28, 0.08))',
+          border: '2px solid rgba(239, 68, 68, 0.6)',
+          borderRadius: '12px', padding: '1.2rem 1.5rem', marginBottom: '1.5rem',
+          boxShadow: '0 4px 20px rgba(239, 68, 68, 0.18)',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          flexWrap: 'wrap', gap: '1rem',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '1rem', flex: 1 }}>
+            <span style={{ fontSize: '2.2rem', lineHeight: 1 }}>⚠️</span>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+                <strong style={{ color: '#fca5a5', fontSize: '1.05rem', fontWeight: 800 }}>
+                  تنبيه: رقم الفاتورة ({form.invoiceNumber}) موجود في قاعدة البيانات ومعتمد مسبقاً!
+                </strong>
+                <span style={{
+                  background: 'rgba(239, 68, 68, 0.25)', color: '#fca5a5', border: '1px solid #ef4444',
+                  fontSize: '0.75rem', padding: '0.2rem 0.6rem', borderRadius: '4px', fontWeight: 800,
+                }}>
+                  تكرار معتمد
+                </span>
+              </div>
+              <div style={{ color: '#e2e8f0', fontSize: '0.9rem', marginTop: '0.4rem', lineHeight: 1.6 }}>
+                <span>• الطرف المسجل له: <strong style={{ color: '#ffffff' }}>{invoiceCheck.otherDocument.partyName || 'غير محدد'}</strong></span>
+                <span style={{ margin: '0 0.8rem' }}>|</span>
+                <span>• المبلغ: <strong style={{ color: '#ffffff' }}>{invoiceCheck.otherDocument.total?.toLocaleString('ar-SA')} ر.س</strong></span>
+                <span style={{ margin: '0 0.8rem' }}>|</span>
+                <span>• الملف الأصلي: <strong style={{ color: '#ffffff' }}>{invoiceCheck.otherDocument.fileName}</strong></span>
+              </div>
+              <p style={{ color: '#cbd5e1', fontSize: '0.85rem', margin: '0.5rem 0 0 0' }}>
+                لتجنب تكرار الحركات المالية بالقوائم المحاسبية، يمكنك حفظ التعديلات فوق هذا المستند بالضغط على <strong>"💾 حفظ التعديلات في نفس المستند"</strong> بدلاً من الاعتماد المكرر.
+              </p>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', alignItems: 'center' }}>
+            <a
+              href={`/documents/${invoiceCheck.otherDocument.documentId}/review`}
+              target="_blank"
+              rel="noopener"
+              className="btn btn-secondary btn-sm"
+              style={{ fontSize: '0.85rem', padding: '0.5rem 1rem', textDecoration: 'none' }}
+            >
+              📄 عرض المستند المعتمد ↗
+            </a>
+            <button
+              type="button"
+              className="btn"
+              onClick={handleSaveDraft}
+              disabled={submitting}
+              style={{
+                background: 'linear-gradient(135deg, #4f46e5, #7c3aed)',
+                color: '#fff', border: 'none', fontWeight: 800, fontSize: '0.85rem', padding: '0.5rem 1rem',
+                borderRadius: '6px', cursor: 'pointer',
+              }}
+            >
+              💾 حفظ في هذا المستند
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 2. تنبيه إذا كان المستند الحالي معتمداً بالفعل */}
+      {doc?.processingStatus === 'approved' && !invoiceCheck?.otherDocument?.isApproved && (
+        <div style={{
+          background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.12), rgba(16, 185, 129, 0.06))',
+          border: '1px solid rgba(34, 197, 94, 0.35)',
+          borderRadius: '12px', padding: '1rem 1.4rem', marginBottom: '1.5rem',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          flexWrap: 'wrap', gap: '1rem',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem' }}>
+            <span style={{ fontSize: '1.7rem' }}>📌</span>
+            <div>
+              <strong style={{ color: '#4ade80', fontSize: '0.95rem' }}>
+                هذا المستند معتمد حالياً ومسجل في كشف الحساب والحركات المالية
+              </strong>
+              <p style={{ color: '#cbd5e1', fontSize: '0.85rem', margin: '0.2rem 0 0 0' }}>
+                إذا كنت تريد تعديل هذا المستند، اضغط على زر <strong>"💾 حفظ التعديلات في نفس المستند"</strong> وسيتم تحديث نفس النسخة بقاعدة البيانات وتحديث الحركة المالية تلقائياً دون تكرار.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={handleSaveDraft}
+            disabled={submitting}
+            style={{ fontWeight: 800, fontSize: '0.85rem', padding: '0.5rem 1rem' }}
+          >
+            💾 حفظ التعديلات في نفس المستند الآن
+          </button>
+        </div>
+      )}
 
       {/* Confidence + Warnings */}
       {doc?.overallConfidence !== null && (
@@ -557,16 +895,81 @@ export default function ReviewPage({ params }: ReviewPageProps) {
                     </select>
                   </div>
                   <div className="form-group">
-                    <label className="form-label">رقم الفاتورة</label>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-1)' }}>
+                      <label className="form-label" style={{ margin: 0 }}>رقم الفاتورة</label>
+                      {invoiceCheck?.otherDocument?.isApproved ? (
+                        <span style={{
+                          fontSize: '0.72rem',
+                          color: '#fca5a5',
+                          background: 'rgba(239, 68, 68, 0.2)',
+                          border: '1px solid rgba(239, 68, 68, 0.4)',
+                          padding: '0.15rem 0.5rem',
+                          borderRadius: '4px',
+                          fontWeight: 800,
+                        }}>
+                          ⚠️ معتمد مسبقاً (تكرار)
+                        </span>
+                      ) : (doc?.processingStatus === 'approved' || invoiceCheck?.currentDocument?.isApproved) ? (
+                        <span style={{
+                          fontSize: '0.72rem',
+                          color: '#4ade80',
+                          background: 'rgba(34, 197, 94, 0.15)',
+                          border: '1px solid rgba(34, 197, 94, 0.3)',
+                          padding: '0.15rem 0.5rem',
+                          borderRadius: '4px',
+                          fontWeight: 700,
+                        }}>
+                          ✓ معتمد في هذا المستند
+                        </span>
+                      ) : null}
+                    </div>
                     <input
                       type="text"
                       className="form-input"
                       placeholder="INV-001 أو اتركه فارغًا"
                       value={form.invoiceNumber}
                       onChange={e => updateForm({ invoiceNumber: e.target.value })}
+                      style={{
+                        borderColor: invoiceCheck?.otherDocument?.isApproved
+                          ? '#ef4444'
+                          : (doc?.processingStatus === 'approved' || invoiceCheck?.currentDocument?.isApproved)
+                            ? '#22c55e'
+                            : undefined,
+                      }}
                     />
-                    {doc?.rawExtraction?.invoice_number.confidence !== undefined && (
-                      <div className="form-hint flex items-center gap-2">
+
+                    {/* تنبيه تحتي مباشر ومفصل عند وجود تطابق معتمد سابق */}
+                    {invoiceCheck?.otherDocument?.isApproved && (
+                      <div style={{
+                        marginTop: '0.45rem',
+                        padding: '0.55rem 0.75rem',
+                        borderRadius: '6px',
+                        background: 'rgba(239, 68, 68, 0.12)',
+                        border: '1px solid rgba(239, 68, 68, 0.35)',
+                        color: '#fca5a5',
+                        fontSize: '0.8rem',
+                        lineHeight: 1.5,
+                      }}>
+                        <div style={{ fontWeight: 800, display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                          <span>⚠️</span>
+                          <span>معتمد مسبقاً للطرف: {invoiceCheck.otherDocument.partyName || 'غير محدد'}</span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.3rem', flexWrap: 'wrap', gap: '0.4rem' }}>
+                          <span>المبلغ: {invoiceCheck.otherDocument.total?.toLocaleString('ar-SA')} ر.س</span>
+                          <a
+                            href={`/documents/${invoiceCheck.otherDocument.documentId}/review`}
+                            target="_blank"
+                            rel="noopener"
+                            style={{ color: '#93c5fd', textDecoration: 'underline', fontSize: '0.75rem', fontWeight: 600 }}
+                          >
+                            عرض المستند الأصلي ↗
+                          </a>
+                        </div>
+                      </div>
+                    )}
+
+                    {doc?.rawExtraction?.invoice_number?.confidence !== undefined && (
+                      <div className="form-hint flex items-center gap-2 mt-1">
                         ثقة: <ConfidenceBadge value={doc.rawExtraction.invoice_number.confidence} />
                       </div>
                     )}
@@ -582,7 +985,7 @@ export default function ReviewPage({ params }: ReviewPageProps) {
                       value={form.invoiceDate}
                       onChange={e => updateForm({ invoiceDate: e.target.value })}
                     />
-                    {doc?.rawExtraction?.invoice_date.confidence !== undefined && (
+                    {doc?.rawExtraction?.invoice_date?.confidence !== undefined && (
                       <div className="form-hint flex items-center gap-2">
                         ثقة: <ConfidenceBadge value={doc.rawExtraction.invoice_date.confidence} />
                       </div>
@@ -677,7 +1080,7 @@ export default function ReviewPage({ params }: ReviewPageProps) {
                       </div>
                     )}
                   </div>
-                  {doc?.rawExtraction?.party.name.confidence !== undefined && (
+                  {doc?.rawExtraction?.party?.name?.confidence !== undefined && (
                     <div className="form-hint flex items-center gap-2">
                       ثقة: <ConfidenceBadge value={doc.rawExtraction.party.name.confidence} />
                     </div>
@@ -900,7 +1303,7 @@ export default function ReviewPage({ params }: ReviewPageProps) {
                       </div>
                     ))}
                   </div>
-                  {doc?.rawExtraction?.transaction.direction.confidence !== undefined && (
+                  {doc?.rawExtraction?.transaction?.direction?.confidence !== undefined && (
                     <div className="form-hint flex items-center gap-2">
                       ثقة: <ConfidenceBadge value={doc.rawExtraction.transaction.direction.confidence} />
                     </div>
@@ -972,20 +1375,32 @@ export default function ReviewPage({ params }: ReviewPageProps) {
             {/* ── Tab: Raw ── */}
             {activeTab === 'raw' && (
               <div>
-                <p className="text-xs text-muted mb-3">البيانات الخام المستخرجة من Gemini — للمرجع فقط</p>
+                <p className="text-xs text-muted mb-3">
+                  {doc?.rawExtraction
+                    ? 'البيانات الخام المستخرجة من Gemini — للمرجع فقط'
+                    : 'البيانات المسجلة للمستند والفاتورة والحركات في قاعدة البيانات'}
+                </p>
                 <pre style={{
                   background: 'var(--color-surface)',
                   border: '1px solid var(--color-border)',
                   borderRadius: 'var(--radius)',
                   padding: 'var(--space-4)',
-                  fontSize: '0.7rem',
+                  fontSize: '0.75rem',
                   overflowX: 'auto',
                   direction: 'ltr',
                   maxHeight: '500px',
                   overflowY: 'auto',
                   color: 'var(--color-text-2)',
                 }}>
-                  {JSON.stringify(doc?.rawExtraction, null, 2)}
+                  {JSON.stringify(
+                    doc?.rawExtraction || doc?.extractedData || {
+                      message: 'لا توجد استخراجات خام من الذكاء الاصطناعي — تم تحميل البيانات من الفاتورة والحركات المحفوظة في قاعدة البيانات',
+                      invoice: doc?.invoice,
+                      transactions: doc?.transactions,
+                    },
+                    null,
+                    2
+                  )}
                 </pre>
               </div>
             )}

@@ -158,6 +158,7 @@ export async function POST(
       invoiceDate: extraction.invoice_date?.value || undefined,
       total: extraction.financial?.total?.value || undefined,
       uploadedById: document.uploadedById,
+      excludeDocumentId: id,
     });
 
     // ─── Match party ──────────────────────────────────────────

@@ -48,14 +48,38 @@ export async function POST(req: NextRequest) {
           address, bankName, iban, openingBalance, openingBalanceDate,
           notes, metadata, ...extraFields } = body;
 
-  if (!name) {
+  if (!name || !name.trim()) {
     return NextResponse.json({ success: false, error: 'اسم الطرف مطلوب' }, { status: 400 });
+  }
+
+  const trimmedName = name.trim();
+  const norm = normalizeArabicText(trimmedName);
+
+  // التحقق من عدم تكرار الطرف
+  const existing = await prisma.party.findFirst({
+    where: {
+      OR: [
+        { normalizedName: norm },
+        { name: { equals: trimmedName, mode: 'insensitive' } },
+      ],
+    },
+  });
+
+  if (existing) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: `الطرف "${existing.name}" مسجل بالفعل في النظام`,
+        data: existing,
+      },
+      { status: 409 }
+    );
   }
 
   const party = await prisma.party.create({
     data: {
-      name,
-      normalizedName: normalizeArabicText(name),
+      name: trimmedName,
+      normalizedName: norm,
       type: type || 'other',
       phone: phone || null,
       email: email || null,

@@ -165,6 +165,7 @@ export interface DuplicateCheckInput {
   invoiceDate?: string;
   total?: number;
   uploadedById: string;
+  excludeDocumentId?: string;
 }
 
 export interface DuplicateCheckResult {
@@ -186,7 +187,10 @@ export async function checkForDuplicates(
   // 1. فحص Hash الملف (أقوى مؤشر)
   if (input.fileHash) {
     const existing = await prisma.document.findFirst({
-      where: { fileHash: input.fileHash },
+      where: {
+        fileHash: input.fileHash,
+        ...(input.excludeDocumentId ? { id: { not: input.excludeDocumentId } } : {}),
+      },
       select: { id: true, fileName: true },
     });
 
@@ -205,6 +209,7 @@ export async function checkForDuplicates(
     const existing = await prisma.invoice.findFirst({
       where: {
         invoiceNumber: input.invoiceNumber,
+        ...(input.excludeDocumentId ? { documentId: { not: input.excludeDocumentId } } : {}),
         party: input.partyName
           ? {
               normalizedName: {
@@ -234,6 +239,7 @@ export async function checkForDuplicates(
 
     const existing = await prisma.invoice.findFirst({
       where: {
+        ...(input.excludeDocumentId ? { documentId: { not: input.excludeDocumentId } } : {}),
         invoiceDate: { gte: dateStart, lte: dateEnd },
         total: input.total,
         party: {
