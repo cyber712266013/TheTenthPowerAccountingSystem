@@ -4,14 +4,32 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "prisma:generate && next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "prisma:generate": "node node_modules/.bin/prisma generate",
+    "prisma:push": "node node_modules/.bin/prisma db push",
+    "prisma:migrate": "node node_modules/.bin/prisma migrate deploy",
+    "prisma:studio": "node node_modules/.bin/prisma studio",
+    "db:seed": "node node_modules/.bin/ts-node prisma/seed.ts",
+    "postinstall": "node node_modules/.bin/prisma generate"
   },
   "dependencies": {
+    "@auth/prisma-adapter": "^2.11.3",
+    "@google/generative-ai": "^0.24.1",
+    "@prisma/client": "^5.22.0",
+    "@types/bcryptjs": "^2.4.6",
+    "bcryptjs": "^3.0.3",
+    "date-fns": "^4.4.0",
+    "googleapis": "^181.0.0",
+    "jspdf": "^4.2.1",
     "next": "16.3.5",
+    "next-auth": "^4.24.15",
+    "prisma": "^5.22.0",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "sharp": "^0.35.4",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -22,5 +40,10 @@
     "eslint-config-next": "16.3.5",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "allowScripts": {
+    "@prisma/client@5.22.0": true,
+    "@prisma/engines@5.22.0": true,
+    "prisma@5.22.0": true
   }
 }

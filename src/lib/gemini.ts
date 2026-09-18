@@ -3,77 +3,113 @@
 // ============================================================
 
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
-import type { GeminiExtractionResult } from './types';
+import type {
+  GeminiExtractionResult,
+  DocumentType,
+  PartyType,
+  Currency,
+  OperationType,
+  TransactionDirection,
+} from './types';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-// ─── System Prompt المتخصص ─────────────────────────────────
+// ─── نماذج Gemini المتاحة (بالترتيب من الأفضل للاحتياطي) ───
+// يتم تجربة النماذج بالترتيب حتى يعمل أحدها
+const FALLBACK_MODELS = [
+  process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite',
+  'gemini-3.1-flash-lite',
+  'gemini-3.1-flash-lite-preview',
+  'gemini-flash-latest',
+'gemini-3.5-flash-lite',
+  'gemini-3.8-flash',
+  'gemini-3.5-flash',
+  'gemini-3.5-flash-lite',
+];
 
-const FINANCIAL_DOCUMENT_SYSTEM_PROMPT = `أنت محلل مستندات مالية متخصص ومتعدد اللغات (عربي وإنجليزي).
+// إزالة التكرار
+const MODELS_TO_TRY = [...new Set(FALLBACK_MODELS)];
 
-مهمتك: قراءة وتحليل المستند المالي المرفق واستخراج جميع البيانات الممكنة بدقة عالية.
+// ─── System Prompt المتخصص والمحكم مالياً ومحاسبياً ─────────
 
-## قواعد صارمة يجب الالتزام بها:
+const FINANCIAL_DOCUMENT_SYSTEM_PROMPT = `أنت خبير ومحاسب مالي قانوني متخصص في تدقيق وتحليل الفواتير والمستندات المالية والبنكية (في المملكة العربية السعودية ودول الخليج).
+تتقن قراءة وفحص الفواتير الضريبية (ZATCA)، إيصالات التحويل البنكي، سندات القبض والصرف، كشوفات الحساب، والمستندات المكتوبة بخط اليد باللغتين العربية والإنجليزية.
 
-### 1. لا تخترع بيانات
-- إذا لم تجد معلومة، أعد: {"value": null, "confidence": 0}
-- لا تكتب تخمينات داخل البيانات النهائية
-- لا تملأ حقلًا بقيمة افتراضية إلا إذا كانت موجودة فعلًا في المستند
+مهمتك: قراءة وتحليل المستند المرفق واستخراج كافة البيانات المالية والمحاسبية بمنتهى الدقة والاحترافية.
 
-### 2. أعط confidence دقيقة لكل حقل
-- 0.99-1.0: مكتوب بوضوح تام، مقروء بشكل مؤكد
-- 0.80-0.98: مقروء بجودة جيدة، شبه مؤكد
-- 0.50-0.79: يحتاج مراجعة، قد يكون خطأ
-- 0.10-0.49: غير واضح، تخمين
-- 0.0: غير موجود أو غير مقروء إطلاقًا
+════════════════════════════════════════════════════════════════
+قواعد صارمة وإلزامية يجب الالتزام بها دون استثناء:
+════════════════════════════════════════════════════════════════
 
-### 3. أنواع المستندات المدعومة
-- invoice: فاتورة مبيعات أو مشتريات
-- payment_receipt: إيصال دفع أو سند قبض
-- bank_transfer: إيصال تحويل بنكي
-- receipt: وصل استلام
-- debit_note: إشعار مدين
-- credit_note: إشعار دائن
-- account_statement: كشف حساب
-- expense: مصروف
-- handwritten: مستند بخط اليد
-- unknown: لا يمكن تحديد النوع
-- other: نوع آخر
+### 1. لغة المخرجات والتحذيرات (بالعربية حصراً):
+- جميع التحذيرات (warnings)، والوصف، والملاحظات يجب أن تُكتب حصراً بـ **اللغة العربية الفصحى السليمة والواضحة**.
+- يُمنع منعاً باتاً كتابة أي تحذير أو ملاحظة باللغة الإنجليزية. إذا كان هناك تحذير ترجمه وصِغه بالعربية المحاسبية الدقيقة.
 
-### 4. تحديد اتجاه العملية
-- gave (عليه): المؤسسة باعت أو قدمت خدمة → المال مستحق عليها للمستند
-- received (له): المؤسسة دفعت أو استلمت دفعة → المال دخل إليها
+### 2. منع الهلوسة والتخمين:
+- إذا لم تجد معلومة بشكل قاطع ومؤكد في المستند، ضع: {"value": null, "confidence": 0}.
+- لا تخترع أرقاماً أو أسماءً أو تواريخ غير موجودة فعلياً في المستند.
+- لا تملأ حقلاً بقيمة افتراضية من عندك ما لم تكن مطبوعة أو مكتوبة في المستند.
 
-### 5. التعامل مع الفواتير العربية
-- قد يكون التاريخ هجريًا أو ميلاديًا
-- إذا كان هجريًا، اذكر ذلك في extra_fields
-- قد تكون الأرقام عربية (٢٠٢٦) أو لاتينية
+### 3. نسب الثقة (Confidence Score):
+- 0.95 - 1.0: مقروء ومؤكد 100% وبخط واضح.
+- 0.80 - 0.94: مقروء بجودة جيدة، شبه مؤكد.
+- 0.50 - 0.79: غير واضح كلياً، يحتاج إلى تدقيق بشري.
+- 0.0: غير موجود في المستند إطلاقاً.
 
-### 6. المستند الذي يحتوي عدة بنود
-- استخرج كل بند منفصلًا
-- لا تدمج بنودًا مختلفة في بند واحد
-- إذا كانت الكمية أو السعر غير واضح، ضعها null وليس 0
+### 4. تحديد هوية الطرف (المؤسسة مقابل الطرف الآخر):
+- نظام الحسابات هذا يعمل لصالح مؤسستنا (مثال: مؤسسة القوة العاشرة للمقاولات أو الجهة المديرة للحساب).
+- حقل الطرف (party): يجب أن يحتوي دائماً على بيانات **الطرف الخارجي المقابل** في المعاملة (العميل، المورد، المقاول، الموظف، المستفيد، أو المحوّل):
+  * في فاتورة المبيعات الصادرة من مؤسستنا: الطرف هو "العميل / المشتري".
+  * في فاتورة المشتريات المستلمة من مورد: الطرف هو "المورد / البائع".
+  * في إيصالات التحويل البنكي (Bank Transfer):
+    - إذا كان التحويل صادراً من حسابنا إلى طرف آخر: الطرف هو "المستفيد (Beneficiary)".
+    - إذا كان التحويل وارداً لحسابنا من طرف آخر: الطرف هو "المحوّل (Sender)".
 
-### 7. التحذيرات
-- أضف تحذيرات واضحة إذا:
-  * صورة مائلة أو منخفضة الجودة
-  * خط يد يصعب قراءته
-  * مبالغ متناقضة (مثلاً: مجموع البنود لا يساوي الإجمالي)
-  * تواريخ غير منطقية
-  * بيانات مفقودة مهمة
+### 5. تحديد نوع المستند (document_type):
+- invoice: فاتورة تجارية أو ضريبية (مبيعات أو مشتريات) تحتوي عادةً على جدول بنود وضريبة.
+- bank_transfer: إشعار أو إيصال تحويل بنكي (تحويل إلكتروني، سريع، دولي، تحويل داخل البنك).
+- payment_receipt: سند قبض أو سند صرف رسمي ورقي أو إلكتروني.
+- receipt: إيصال نقد، وصل استلام، أو فاتورة كاش مبسطة.
+- account_statement: كشف حساب دوري أو مطابقة رصيد.
+- debit_note: إشعار مدين.
+- credit_note: إشعار دائن.
+- expense: إيصال مصروف نثري أو تشغيلي أو وقود.
+- handwritten: مستند أو بيان مكتوب بخط اليد.
+- other: أي مستند مالي آخر لا يقع تحت ما سبق.
 
-### 8. extra_fields — البيانات الإضافية
-إذا وجدت بيانات مهمة لا تقع في الحقول المعيارية، ضعها في extra_fields:
-- رقم أمر الشراء (PO Number)
-- رقم العقد
-- مركز التكلفة
-- رقم المشروع
-- الفترة المشمولة
-- شروط الدفع
-- ملاحظات خاصة
-- أي بيانات أخرى مهمة
+### 6. التمييز الذكي بين الفواتير والحوالات البنكية:
+- إيصالات التحويل البنكي (bank_transfer) وسندات الصرف/القبض:
+  * لا تحتوي على بنود أو أصناف (items)، اترك مصفوفة items فارغة [] تلقائياً.
+  * لا تحتوي على ضرائب أو خصم عادةً؛ اجعل subtotal = null و tax_amount = null.
+  * ضع قيمة الحوالة المحولة مباشرة في: financial.total و transaction.amount.
+  * استخرج الرقم المرجعي للتحويل، اسم البنك، والآيبان وضعها في extra_fields.
 
-لا تترك بيانات مهمة خارج الـ JSON.`;
+### 7. تحديد اتجاه الحركة المحاسبية (direction: gave / received):
+معادلة كشف الحساب في النظام: (الرصيد الجديد = الرصيد السابق + عليه - له).
+- gave (عليه / مدين):
+  * عندما تدفع المؤسسة للمستفيد أو تحول له مبلغاً بنكياً (حوالة صادرة).
+  * عندما تبيع المؤسسة بضاعة أو تقدم خدمة للعميل بالأجل (فاتورة مبيعات مستحقة عليه).
+  * عندما تصرف المؤسسة عهدة أو سلفة لموظف.
+- received (له / دائن):
+  * عندما تستلم المؤسسة دفعة نقدية أو حوالة بنكية واردة من عميل.
+  * عندما تشتري المؤسسة بضاعة أو تستلم خدمة من مورد بالأجل (فاتورة مشتريات مستحقة له في ذمتنا).
+
+### 8. معايير استخراج التواريخ:
+- استخرج التاريخ دائماً بالتقويم الميلادي بصيغة ISO القياسية: YYYY-MM-DD (مثال: 2026-03-15).
+- إذا كان التاريخ في المستند هجرياً (مثلاً: 1447/09/20هـ)، اذكره كما هو في extra_fields، وحوله للميلادي في حقل invoice_date إن أمكن.
+
+### 9. معايير استخراج الأرقام والمبالغ:
+- استخرج المبالغ دائماً كـ **أرقام عددية نقية (Numbers)** وليس نصوص.
+- احذف فواصل الآلاف ورموز العملات (مثلاً: "8,879.15 ر.س" تُستخرج كـ 8879.15).
+- تأكد أن الضريبة في السعودية هي 15% للفواتير الضريبية القياسية، وتأكد من مطابقة: (المجموع الفرعي + الضريبة - الخصم = الإجمالي).
+
+### 10. الحقول الإضافية الهامة (extra_fields):
+استخرج كل تفصيل إضافي مهم وضعه في extra_fields ككائن: {"value": ..., "confidence": ...}:
+- رقم الحوالة المرجعي (Transfer Reference Number)
+- اسم البنك المحول منه والبنك المحول إليه
+- رقم الحساب أو الآيبان (IBAN)
+- رقم أمر الشراء (PO Number) أو رقم المشروع / العقد
+- شروط السداد، أو اسم المحاسب/المعتمد.`;
 
 // ─── JSON Schema لـ Gemini ──────────────────────────────────
 
@@ -352,6 +388,84 @@ export interface AnalyzeDocumentResult {
   rawResponse?: string;
   error?: string;
   processingTime?: number;
+  modelUsed?: string; // أي نموذج استُخدم فعلياً
+}
+
+// ─── مساعدة لضمان سلامة هيكل البيانات المستخرجة ───────────
+function normalizeExtraction(raw: any): GeminiExtractionResult {
+  const safeField = <T>(val: any, defaultVal: T = null as unknown as T, defaultConf = 0.5) => {
+    if (val && typeof val === 'object' && 'value' in val) {
+      return {
+        value: val.value !== undefined ? (val.value as T) : defaultVal,
+        confidence: typeof val.confidence === 'number' ? val.confidence : defaultConf,
+      };
+    }
+    return {
+      value: val !== undefined ? (val as T) : defaultVal,
+      confidence: defaultConf,
+    };
+  };
+
+  const fin = raw?.financial || {};
+  const party = raw?.party || {};
+  const txn = raw?.transaction || {};
+
+  return {
+    document_type: (raw?.document_type as DocumentType) || 'other',
+    overall_confidence: typeof raw?.overall_confidence === 'number' ? raw?.overall_confidence : 0.7,
+
+    invoice_number: safeField<string | null>(raw?.invoice_number, null),
+    invoice_date: safeField<string | null>(raw?.invoice_date, null),
+    due_date: safeField<string | null>(raw?.due_date, null),
+
+    party: {
+      name: safeField<string | null>(party.name, null),
+      type: safeField<PartyType>(party.type, 'other'),
+      phone: safeField<string | null>(party.phone, null),
+      email: safeField<string | null>(party.email, null),
+      tax_number: safeField<string | null>(party.tax_number, null),
+      commercial_registration: safeField<string | null>(party.commercial_registration, null),
+      bank_account: safeField<string | null>(party.bank_account, null),
+      address: safeField<string | null>(party.address, null),
+    },
+
+    items: Array.isArray(raw?.items)
+      ? raw.items.map((it: any, idx: number) => ({
+          line_number: typeof it?.line_number === 'number' ? it.line_number : idx + 1,
+          description: safeField<string>(it?.description, ''),
+          unit: safeField<string>(it?.unit, ''),
+          quantity: safeField<number | null>(it?.quantity, null),
+          unit_price: safeField<number | null>(it?.unit_price, null),
+          tax_rate: safeField<number | null>(it?.tax_rate, null),
+          tax_amount: safeField<number | null>(it?.tax_amount, null),
+          discount: safeField<number | null>(it?.discount, null),
+          total: safeField<number | null>(it?.total, null),
+          confidence: typeof it?.confidence === 'number' ? it.confidence : 0.8,
+        }))
+      : [],
+
+    financial: {
+      subtotal: safeField<number | null>(fin.subtotal, null),
+      tax_amount: safeField<number | null>(fin.tax_amount, null),
+      tax_rate: safeField<number | null>(fin.tax_rate, null),
+      discount: safeField<number | null>(fin.discount, null),
+      total: safeField<number | null>(fin.total, null),
+      paid: safeField<number | null>(fin.paid, null),
+      remaining: safeField<number | null>(fin.remaining, null),
+      currency: safeField<Currency>(fin.currency, 'SAR'),
+    },
+
+    transaction: {
+      operation: safeField<OperationType>(txn.operation, 'invoice'),
+      direction: safeField<TransactionDirection>(txn.direction, 'gave'),
+      amount: safeField<number | null>(txn.amount, null),
+      description: safeField<string>(txn.description, ''),
+    },
+
+    extra_fields: raw?.extra_fields && typeof raw.extra_fields === 'object' ? raw.extra_fields : {},
+    warnings: Array.isArray(raw?.warnings) ? raw.warnings : [],
+    raw_text_excerpt: raw?.raw_text_excerpt || '',
+  };
 }
 
 export async function analyzeDocument(
@@ -359,73 +473,95 @@ export async function analyzeDocument(
 ): Promise<AnalyzeDocumentResult> {
   const startTime = Date.now();
 
-  try {
-    const model = genAI.getGenerativeModel({
-      model: process.env.GEMINI_MODEL || 'gemini-1.5-pro',
-      systemInstruction: FINANCIAL_DOCUMENT_SYSTEM_PROMPT,
-      generationConfig: {
-        responseMimeType: 'application/json',
-        responseSchema: EXTRACTION_SCHEMA as any,
-        temperature: 0.1, // منخفضة لدقة أعلى
-        maxOutputTokens: 8192,
-      },
-    });
-
-    const prompt = `حلل هذا المستند المالي واستخرج جميع البيانات الممكنة.
+  const prompt = `حلل هذا المستند المالي واستخرج جميع البيانات الممكنة بدقة محاسبية وقانونية عالية.
 اسم الملف: ${options.fileName || 'غير معروف'}
 نوع الملف: ${options.mimeType}
 
-المطلوب:
-1. حدد نوع المستند
-2. استخرج جميع البيانات المالية
-3. استخرج بيانات الطرف (المورد/العميل)
-4. استخرج جميع بنود الفاتورة
-5. حدد اتجاه العملية (gave/received)
-6. أضف أي بيانات إضافية في extra_fields
-7. أضف تحذيرات إذا كانت الصورة غير واضحة أو البيانات متناقضة`;
+المطلوب بدقة:
+1. حدد نوع المستند بدقة (فاتورة / تحويل بنكي / سند قبض أو صرف / كشف حساب...).
+2. استخرج الطرف المقابل (المورد أو العميل أو المستفيد/المحوّل) وتفاصيله (الاسم، الضريبي، البنك...).
+3. استخرج المبالغ المالية بدقة كأرقام عددية نيرة (المجموع، الضريبة، الخصم، الإجمالي، المدفوع، المتبقي).
+4. استخرج البنود التفصيلية إن وجدت في الفواتير (واتركها فارغة إذا كان تحويلاً بنكياً أو سنداً).
+5. حدد اتجاه العملية المحاسبية (gave: عليه / received: له) بدقة متناهية وفق القواعد المحاسبية.
+6. اكتب جميع التحذيرات (warnings) والملاحظات باللغة العربية الفصحى حصراً، ولا تكتب أي نص بالإنجليزية.
+7. ضع أي بيانات إضافية مهمة كالأرقام المرجعية والآيبان في extra_fields.`;
 
-    const result = await model.generateContent([
-      {
-        inlineData: {
-          mimeType: options.mimeType,
-          data: options.fileData,
-        },
-      },
-      prompt,
-    ]);
+  let lastError = '';
 
-    const rawText = result.response.text();
-    const processingTime = Date.now() - startTime;
-
-    let extraction: GeminiExtractionResult;
+  // ─── تجربة النماذج بالترتيب حتى يعمل أحدها ───────────────
+  for (const modelName of MODELS_TO_TRY) {
     try {
-      extraction = JSON.parse(rawText);
-    } catch {
-      // إذا فشل parse الـ JSON، أرجع خطأ
+      console.log(`[Gemini] محاولة النموذج: ${modelName}`);
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        systemInstruction: FINANCIAL_DOCUMENT_SYSTEM_PROMPT,
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema: EXTRACTION_SCHEMA as any,
+          temperature: 0.1,
+          maxOutputTokens: 8192,
+        },
+      });
+
+      const result = await model.generateContent([
+        {
+          inlineData: {
+            mimeType: options.mimeType,
+            data: options.fileData,
+          },
+        },
+        prompt,
+      ]);
+
+      const rawText = result.response.text();
+      const processingTime = Date.now() - startTime;
+      console.log(`[Gemini] ✅ نجح النموذج: ${modelName} (${processingTime}ms)`);
+
+      let extraction: GeminiExtractionResult;
+      try {
+        const parsed = JSON.parse(rawText);
+        extraction = normalizeExtraction(parsed);
+      } catch {
+        return {
+          success: false,
+          rawResponse: rawText,
+          error: 'فشل في تحليل نتيجة الذكاء الاصطناعي',
+          processingTime,
+        };
+      }
+
+      return {
+        success: true,
+        extraction,
+        rawResponse: rawText,
+        processingTime,
+        modelUsed: modelName,
+      };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      lastError = errMsg;
+      // إذا كان 503 (مشغول) أو 404 (غير متاح) — جرب النموذج التالي
+      const shouldFallback = errMsg.includes('503') || errMsg.includes('503') ||
+        errMsg.includes('404') || errMsg.includes('overloaded') || errMsg.includes('demand');
+      if (shouldFallback) {
+        console.warn(`[Gemini] ⚠️ ${modelName} غير متاح (${errMsg.substring(0, 60)}) — جرب التالي`);
+        continue;
+      }
+      // أي خطأ آخر → أوقف مباشرة
       return {
         success: false,
-        rawResponse: rawText,
-        error: 'فشل في تحليل نتيجة الذكاء الاصطناعي',
-        processingTime,
+        error: errMsg,
+        processingTime: Date.now() - Date.now(),
       };
     }
-
-    return {
-      success: true,
-      extraction,
-      rawResponse: rawText,
-      processingTime,
-    };
-  } catch (error) {
-    const processingTime = Date.now() - startTime;
-    const errorMessage = error instanceof Error ? error.message : 'خطأ غير متوقع';
-    
-    return {
-      success: false,
-      error: errorMessage,
-      processingTime,
-    };
   }
+
+  // كل النماذج فشلت
+  return {
+    success: false,
+    error: `جميع نماذج Gemini غير متاحة حالياً. آخر خطأ: ${lastError}`,
+    processingTime: Date.now() - Date.now(),
+  };
 }
 
 // ─── Party Matching via Gemini ──────────────────────────────
@@ -440,7 +576,7 @@ export async function matchPartyWithGemini(
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-1.5-flash', // نموذج أسرع لمهام البحث البسيطة
+      model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
       generationConfig: {
         responseMimeType: 'application/json',
         temperature: 0,
